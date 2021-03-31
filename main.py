@@ -15,12 +15,6 @@ from sequoia.client.setting_proxy import SettingProxy
 from submission.submission import get_method, get_method_rl, get_method_sl
 
 
-# FIXME : Temporarly disable the warnings until sequoia fixes the loading of the dataset
-import warnings
-warnings.filterwarnings("ignore")
-#-------------------------------------------
-
-
 def run_track(method: Method, setting: Setting, yamlfile: str) -> Results:
     setting = SettingProxy(setting, yamlfile)
     results = setting.apply(method)
