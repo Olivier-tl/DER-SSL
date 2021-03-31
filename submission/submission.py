@@ -5,7 +5,7 @@ track.
 from sequoia import Method
 from sequoia.settings import PassiveSetting, ActiveSetting, Setting
 
-from .example_classifier import ExampleMethod
+from .models.example_classifier import ExampleMethod
 
 
 def get_method_sl() -> Method[PassiveSetting]:
