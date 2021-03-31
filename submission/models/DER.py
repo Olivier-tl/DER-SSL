@@ -28,9 +28,9 @@ from simple_parsing import ArgumentParser
 from torch import Tensor, nn
 from torchvision.models import ResNet, resnet18
 from torch.optim.optimizer import Optimizer
+import torch.nn.functional as F
 
-# from submission.utils.continual_model import ContinualModel
-# from submission.utils.buffer import Buffer
+from submission.utils.buffer import Buffer
 
 # def get_parser() -> ArgumentParser:
 #     parser = ArgumentParser(description='Continual learning via'
@@ -81,6 +81,9 @@ class DER(nn.Module):
         observation_space: gym.Space,
         action_space: gym.Space,
         reward_space: gym.Space,
+        alpha: float,
+        beta: float,
+        buffer_size: float,
     ):
         super().__init__()
         image_space: Image = observation_space.x
@@ -95,6 +98,10 @@ class DER(nn.Module):
         self.encoder, self.representations_size = self.create_encoder(image_space)
         self.output = self.create_output_head()
         self.loss = nn.CrossEntropyLoss()
+
+        self.alpha = alpha
+        self.beta = beta
+        self.buffer = Buffer(buffer_size, self.device)
 
     def create_output_head(self) -> nn.Module:
         return nn.Linear(self.representations_size, self.n_classes).to(self.device)
@@ -123,7 +130,7 @@ class DER(nn.Module):
             If no encoder is available for the given image dimensions.
         """
         
-        # TODO : Add the implementation of EfficientNet
+        # TODO : Add the option for EfficientNet
 
         if image_space.width == image_space.height == 224:
             # Synbols dataset: use a resnet18 by default.
@@ -177,6 +184,7 @@ class DER(nn.Module):
         # get the corresponding rewards (image labels).
         observations: Observations = batch[0]
         rewards: Optional[Rewards] = batch[1]
+        
         # Get the predictions:
         logits = self(observations)
         y_pred = logits.argmax(-1)
@@ -191,6 +199,18 @@ class DER(nn.Module):
 
         loss = self.loss(logits, image_labels)
 
+        # vvvvvv DER vvvvvvv
+        if not self.buffer.is_empty():
+            batch_size = observations.x.shape[0]
+            # TODO: Add proper transforms argument to get_data()
+            buf_inputs, buf_logits = self.buffer.get_data(batch_size) 
+            buf_outputs = self(Observations(x=buf_inputs))
+            loss += self.alpha * F.mse_loss(buf_outputs, buf_logits)
+
+        # NOTE: make sure arg examples are not be augmented
+        self.buffer.add_data(examples=observations.x, logits=logits.data)
+        # ^^^^^^ DER ^^^^^^^
+        
         accuracy = (y_pred == image_labels).sum().float() / len(image_labels)
         metrics_dict = {"accuracy": f"{accuracy.cpu().item():3.2%}"}
         return loss, metrics_dict
@@ -216,6 +236,15 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         # Number of epochs with increasing validation loss after which we stop training.
         early_stop_patience: int = 2
 
+        # Alpha: Weight of logits replay penalty for DER
+        alpha: float = 0.5
+
+        # Beta: Weight of label replay penalty for DER++
+        beta: float = 0.5
+
+        # Buffer size
+        buffer_size = 500
+
     def __init__(self, hparams: HParams = None):
         self.hparams: ExampleMethod.HParams = hparams or self.HParams()
 
@@ -233,6 +262,9 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             observation_space=setting.observation_space,
             action_space=setting.action_space,
             reward_space=setting.reward_space,
+            alpha=self.hparams.alpha,
+            beta=self.hparams.beta,
+            buffer_size=self.hparams.buffer_size,
         )
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
