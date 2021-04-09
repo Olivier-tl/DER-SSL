@@ -6,6 +6,7 @@ from sequoia import Method
 from sequoia.settings import PassiveSetting, ActiveSetting, Setting
 
 from .models.example_classifier import ExampleMethod
+from .models.der import DerMethod
 
 
 def get_method_sl() -> Method[PassiveSetting]:
@@ -22,8 +23,8 @@ def get_method_sl() -> Method[PassiveSetting]:
     Method[PassiveSetting]
         A Method applicable to continual supervised learning Settings.
     """
-    return ExampleMethod(hparams=ExampleMethod.HParams())
-
+    # return ExampleMethod(hparams=ExampleMethod.HParams())
+    return DerMethod(hparams=DerMethod.HParams())
 
 def get_method_rl() -> Method[ActiveSetting]:
     """Returns the Method to be be used for the reinforcement learning track.

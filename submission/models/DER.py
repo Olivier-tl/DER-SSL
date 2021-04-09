@@ -5,8 +5,10 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import random
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
+import typing
 
 import gym
 import torch
@@ -27,10 +29,13 @@ from sequoia.settings.passive.cl.objects import (
 from simple_parsing import ArgumentParser
 from torch import Tensor, nn
 from torchvision.models import ResNet, resnet18
+from torchvision import transforms
 from torch.optim.optimizer import Optimizer
 import torch.nn.functional as F
 
 from submission.utils.buffer import Buffer
+from submission.utils.rotation_transform import Rotation
+
 
 
 class DER(nn.Module):
@@ -41,12 +46,19 @@ class DER(nn.Module):
 
     def __init__(
         self,
+        setting: ClassIncrementalSetting,
         observation_space: gym.Space,
         action_space: gym.Space,
         reward_space: gym.Space,
+        nb_tasks: int,
         alpha: float,
         beta: float,
         buffer_size: float,
+        use_ssl: bool, 
+        ssl_alpha: float,
+        ssl_m: int,
+        ssl_rotation_angles: int,
+        use_owm: bool,
     ):
         super().__init__()
         image_space: Image = observation_space.x
@@ -58,16 +70,29 @@ class DER(nn.Module):
         self.n_classes = action_space.n
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        self.setting = setting
         self.encoder, self.representations_size = self.create_encoder(image_space)
-        self.output = self.create_output_head()
+        self.output = self.create_output_head(self.n_classes)
+        self.ssl_output = self.create_output_head(len(ssl_rotation_angles))
         self.loss = nn.CrossEntropyLoss()
+        self.nb_tasks = nb_tasks
 
+        # DER params
         self.alpha = alpha
         self.beta = beta
         self.buffer = Buffer(buffer_size, self.device)
 
-    def create_output_head(self) -> nn.Module:
-        return nn.Linear(self.representations_size, self.n_classes).to(self.device)
+        # SSL params
+        self.use_ssl = use_ssl
+        self.ssl_alpha = ssl_alpha
+        self.ssl_m = ssl_m
+        self.ssl_rotation_angles = ssl_rotation_angles
+        
+        # OWM params
+        self.use_owm = use_owm
+
+    def create_output_head(self, n_outputs) -> nn.Module:
+        return nn.Linear(self.representations_size, n_outputs).to(self.device)
 
     def create_encoder(self, image_space: Image) -> Tuple[nn.Module, int]:
         """Create an encoder for the given image space.
@@ -163,14 +188,38 @@ class DER(nn.Module):
         loss = self.loss(logits, image_labels)
 
         # vvvvvv DER vvvvvvv
+
+        if (observations.task_labels != observations.task_labels[0]).all().item():
+            print('NOT ALL EXAMPLES IN THE BATCH ARE FROM THE SAME TASK, THIS IS NOT CURRENTLY SUPPORTED.')
+
         if not self.buffer.is_empty():
             batch_size = observations.x.shape[0]
-            # TODO: Add proper transforms argument to get_data()
+            # TODO: Add proper transforms argument to get_data().
+            #       Actually the DER paper do not use augmentation for 
+            #       the MNIST dataset so maybe not needed. Issue #8
             buf_inputs, buf_logits = self.buffer.get_data(batch_size) 
             buf_outputs = self(Observations(x=buf_inputs))
             loss += self.alpha * F.mse_loss(buf_outputs, buf_logits)
 
-        # NOTE: make sure arg examples are not be augmented
+            ssl_term = 0 
+            if self.use_ssl:
+                # FIXME: Is it possible that examples in the batch are from different tasks?
+                task_id = observations.task_labels[0].item()
+                alpha_t = self.alpha * (self.nb_tasks - task_id)/(self.nb_tasks - 1)
+                
+                ssl_term = 0
+                for i in range(self.ssl_m):
+                    # Rotate data
+                    angle_label = random.randint(0, len(self.ssl_rotation_angles)-1)
+                    angle = self.ssl_rotation_angles[angle_label]
+                    buf_inputs, _ = self.buffer.get_data(batch_size, transform=Rotation(angle))
+                    features = self.encoder(buf_inputs)
+                    angle_logits = self.ssl_output(features)
+                    ssl_term += self.loss(angle_logits, torch.LongTensor([angle_label]*batch_size))
+                
+                loss += alpha_t / self.ssl_m * ssl_term
+
+        # NOTE: make sure arg examples are not augmented
         self.buffer.add_data(examples=observations.x, logits=logits.data)
         # ^^^^^^ DER ^^^^^^^
         
@@ -206,7 +255,23 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         beta: float = 0.5
 
         # Buffer size
-        buffer_size = 500
+        buffer_size: int = 500
+
+        # Use SSL
+        use_ssl: bool = True
+
+        # SSL alpha hyperparameter 
+        ssl_alpha: float = 5
+
+        # Number of transformation to apply in the SSL term
+        # FIXME: NO CLUE what is the value of this term (not mentioned in paper)
+        ssl_m: int = 1
+
+        # List of possible rotation angles for SSL
+        ssl_rotation_angles = [0, 90, 180, 270]
+
+        # Use OWM
+        use_owm: bool = False
 
     def __init__(self, hparams: HParams = None):
         self.hparams: ExampleMethod.HParams = hparams or self.HParams()
@@ -222,12 +287,19 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         where you get access to the observation & action spaces.
         """
         self.model = DER(
+            setting=setting,
             observation_space=setting.observation_space,
             action_space=setting.action_space,
             reward_space=setting.reward_space,
+            nb_tasks=setting.nb_tasks,
             alpha=self.hparams.alpha,
             beta=self.hparams.beta,
             buffer_size=self.hparams.buffer_size,
+            use_ssl=self.hparams.use_ssl,
+            ssl_alpha=self.hparams.ssl_alpha,
+            ssl_m=self.hparams.ssl_m,
+            ssl_rotation_angles=self.hparams.ssl_rotation_angles,
+            use_owm=self.hparams.use_owm,
         )
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
