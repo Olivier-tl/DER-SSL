@@ -200,18 +200,21 @@ class DER(nn.Module):
             buf_outputs = self(Observations(x=buf_inputs))
             loss += self.alpha * F.mse_loss(buf_outputs, buf_logits)
 
-            ssl_term = 0 
             if self.use_ssl:
                 # FIXME: Is it possible that examples in the batch are from different tasks?
                 task_id = observations.task_labels[0].item()
                 alpha_t = self.alpha * (self.nb_tasks - task_id)/(self.nb_tasks - 1)
                 
                 ssl_term = 0
+                buf_inputs, _ = self.buffer.get_data(batch_size)
                 for angle_label in range(self.ssl_m):
                     # Rotate data
                     angle = self.ssl_rotation_angles[angle_label]
-                    buf_inputs, _ = self.buffer.get_data(batch_size, transform=Rotation(angle))
-                    features = self.encoder(buf_inputs)
+                    
+                    # ret_tuple = (torch.stack([transform(ee.cpu())
+                    #                     for ee in self.examples[choice]]).to(self.device),)
+                    buf_inputs_transformed = Rotation(angle).forward(buf_inputs)
+                    features = self.encoder(buf_inputs_transformed)
                     angle_logits = self.ssl_output(features)
                     angle_labels = torch.LongTensor([angle_label]*batch_size).to(self.device)
                     ssl_term += self.loss(angle_logits, angle_labels)
