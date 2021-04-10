@@ -56,7 +56,6 @@ class DER(nn.Module):
         buffer_size: float,
         use_ssl: bool, 
         ssl_alpha: float,
-        ssl_m: int,
         ssl_rotation_angles: int,
         use_owm: bool,
     ):
@@ -85,7 +84,7 @@ class DER(nn.Module):
         # SSL params
         self.use_ssl = use_ssl
         self.ssl_alpha = ssl_alpha
-        self.ssl_m = ssl_m
+        self.ssl_m = len(ssl_rotation_angles)
         self.ssl_rotation_angles = ssl_rotation_angles
         
         # OWM params
@@ -208,14 +207,14 @@ class DER(nn.Module):
                 alpha_t = self.alpha * (self.nb_tasks - task_id)/(self.nb_tasks - 1)
                 
                 ssl_term = 0
-                for i in range(self.ssl_m):
+                for angle_label in range(self.ssl_m):
                     # Rotate data
-                    angle_label = random.randint(0, len(self.ssl_rotation_angles)-1)
                     angle = self.ssl_rotation_angles[angle_label]
                     buf_inputs, _ = self.buffer.get_data(batch_size, transform=Rotation(angle))
                     features = self.encoder(buf_inputs)
                     angle_logits = self.ssl_output(features)
-                    ssl_term += self.loss(angle_logits, torch.LongTensor([angle_label]*batch_size))
+                    angle_labels = torch.LongTensor([angle_label]*batch_size).to(self.device)
+                    ssl_term += self.loss(angle_logits, angle_labels)
                 
                 loss += alpha_t / self.ssl_m * ssl_term
 
@@ -263,10 +262,6 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         # SSL alpha hyperparameter 
         ssl_alpha: float = 5
 
-        # Number of transformation to apply in the SSL term
-        # FIXME: NO CLUE what is the value of this term (not mentioned in paper)
-        ssl_m: int = 1
-
         # List of possible rotation angles for SSL
         ssl_rotation_angles = [0, 90, 180, 270]
 
@@ -297,7 +292,6 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             buffer_size=self.hparams.buffer_size,
             use_ssl=self.hparams.use_ssl,
             ssl_alpha=self.hparams.ssl_alpha,
-            ssl_m=self.hparams.ssl_m,
             ssl_rotation_angles=self.hparams.ssl_rotation_angles,
             use_owm=self.hparams.use_owm,
         )
