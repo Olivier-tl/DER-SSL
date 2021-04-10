@@ -120,7 +120,7 @@ class DER(nn.Module):
         
         # TODO : Add the option for EfficientNet
 
-        if image_space.width == image_space.height == 224:
+        if image_space.width == image_space.height == 32:
             # Synbols dataset: use a resnet18 by default.
             resnet: ResNet = resnet18(pretrained=False)
             features = resnet.fc.in_features
