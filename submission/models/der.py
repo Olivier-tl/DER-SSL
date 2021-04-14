@@ -6,10 +6,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import random
+import dataclasses
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, List
 import typing
 
+import wandb
 import gym
 import torch
 import tqdm
@@ -20,6 +22,7 @@ from sequoia.common.spaces import Image
 from sequoia.methods import Method
 from sequoia.settings import ClassIncrementalSetting
 from sequoia.settings.passive import PassiveEnvironment
+from sequoia.settings.base.setting import Setting, SettingType
 from sequoia.settings.passive.cl.objects import (
     Actions,
     Environment,
@@ -66,8 +69,6 @@ class DER(nn.Module):
         assert action_space == reward_space
         self.n_classes = action_space.n
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        self.setting = setting
         self.encoder, self.representations_size = self.create_encoder(image_space)
         self.output = self.create_output_head(self.n_classes)
         self.ssl_output = self.create_output_head(len(ssl_rotation_angles))
@@ -90,7 +91,7 @@ class DER(nn.Module):
 
     def create_output_head(self, n_outputs) -> nn.Module:
         return nn.Linear(self.representations_size, n_outputs).to(self.device)
-
+    
     def create_encoder(self, image_space: Image) -> Tuple[nn.Module, int]:
         """Create an encoder for the given image space.
 
@@ -276,12 +277,16 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         self.model: DER
         self.optimizer: torch.optim.Optimizer
 
+        # self.trainer_options = TrainerConfig()
+        # self.config = Config()
+
     def configure(self, setting: ClassIncrementalSetting):
         """ Called before the method is applied on a setting (before training).
 
         You can use this to instantiate your model, for instance, since this is
         where you get access to the observation & action spaces.
-        """
+        """ 
+        # self.trainer = self.create_trainer(setting)
         self.model = DER(
             setting=setting,
             observation_space=setting.observation_space,
@@ -301,6 +306,14 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             lr=self.hparams.learning_rate,
             weight_decay=self.hparams.weight_decay,
         )
+        wandb.init(
+                    project=setting.wandb.project,
+                    entity=setting.wandb.entity,
+                    mode='offline',
+                    dir='output',
+                    config=dataclasses.asdict(self.hparams)
+        )
+        self.setting = setting
 
     def fit(self, train_env: PassiveEnvironment, valid_env: PassiveEnvironment):
         """Training loop.
@@ -308,25 +321,32 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         NOTE: In the Settings where task boundaries are known (in this case all
         the supervised CL settings), this will be called once per task.
         """
+        # # Reset trainer
+        # self.trainer = self.create_trainer(self.setting)
         # configure() will have been called by the setting before we get here.
         best_val_loss = inf
         best_epoch = 0
         for epoch in range(self.hparams.max_epochs_per_task):
             self.model.train()
             print(f"Starting epoch {epoch}")
+
             # Training loop:
             with tqdm.tqdm(train_env) as train_pbar:
                 postfix = {}
                 train_pbar.set_description(f"Training Epoch {epoch}")
+                epoch_train_loss = 0.0
+
                 for i, batch in enumerate(train_pbar):
-                    loss, metrics_dict = self.model.shared_step(batch,
-                                                                environment=train_env)
+                    loss, metrics_dict = self.model.shared_step(
+                        batch, environment=train_env
+                    )
+                    epoch_train_loss += loss
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
                     postfix.update(metrics_dict)
                     train_pbar.set_postfix(postfix)
-
+            train_accuracy = float(metrics_dict['accuracy'][:-1])
             # Validation loop:
             self.model.eval()
             torch.set_grad_enabled(False)
@@ -342,7 +362,15 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                     postfix.update(metrics_dict, val_loss=epoch_val_loss)
                     val_pbar.set_postfix(postfix)
             torch.set_grad_enabled(True)
-
+            valid_accuracy = float(metrics_dict['accuracy'][:-1])
+            wandb.log({
+                        'epoch': epoch,
+                        'task_id': self.setting.get_attribute('_current_task_id'),
+                        'train_accuracy': train_accuracy,
+                        'valid_accuracy':valid_accuracy,
+                        'train_loss':epoch_train_loss,
+                        'valid_loss':epoch_val_loss,
+                    })
             if epoch_val_loss < best_val_loss:
                 best_val_loss = epoch_val_loss
                 best_epoch = i
@@ -350,6 +378,32 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 print(f"Early stopping at epoch {i}.")
                 # NOTE: You should probably reload the model weights as they were at the
                 # best epoch.
+    
+    # def create_trainer(self, setting: SettingType) -> Trainer:
+    #     """Creates a Trainer object from pytorch-lightning for the given setting.
+
+    #     NOTE: At the moment, uses the KNN and VAE callbacks.
+    #     To use different callbacks, overwrite this method.
+
+    #     Args:
+
+    #     Returns:
+    #         Trainer: the Trainer object.
+    #     """
+    #     # We use this here to create loggers!
+    #     # callbacks = self.create_callbacks(setting)
+    #     loggers = []
+    #     # setting.wandb = WandbConfig()
+    #     # setting.wandb.project: 'DER-SSL'
+    #     # setting.wandb.entity: 'continual-learning'
+    #     # setting.wandb.offline: True
+    #     if setting.wandb:
+    #         wandb_logger = setting.wandb.make_logger('results')
+    #         loggers.append(wandb_logger)
+    #     trainer = self.trainer_options.make_trainer(
+    #         config=self.config, loggers=loggers,
+    #     )
+    #     return trainer
 
     def get_actions(self, observations: Observations, action_space: gym.Space) -> Actions:
         """ Get a batch of predictions (aka actions) for these observations. """
@@ -358,6 +412,30 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         # Get the predicted classes
         y_pred = logits.argmax(dim=-1)
         return self.target_setting.Actions(y_pred)
+
+    # def create_callbacks(self, setting: SettingType) -> List[Callback]:
+    #     """Create the PytorchLightning Callbacks for this Setting.
+
+    #     These callbacks will get added to the Trainer in `create_trainer`.
+
+    #     Parameters
+    #     ----------
+    #     setting : SettingType
+    #         The `Setting` on which this Method is going to be applied.
+
+    #     Returns
+    #     -------
+    #     List[Callback]
+    #         A List of `Callaback` objects to use during training.
+    #     """
+    #     # TODO: Move this to something like a `configure_callbacks` method in the model,
+    #     # once PL adds it.
+    #     # from sequoia.common.callbacks.vae_callback import SaveVaeSamplesCallback
+    #     return [
+    #         # EarlyStopping(monitor="val Loss")
+    #         # self.hparams.knn_callback,
+    #         # SaveVaeSamplesCallback(),
+    #     ]
 
     @classmethod
     def add_argparse_args(cls, parser: ArgumentParser, dest: str = ""):
