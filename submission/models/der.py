@@ -37,13 +37,11 @@ from submission.utils.buffer import Buffer
 from submission.utils.rotation_transform import Rotation
 
 
-
 class DER(nn.Module):
     """ Implementation of Dark Experience Replay
 
     This model uses a resnet18 or efficientNet as the encoder, and a single output layer.
     """
-
     def __init__(
         self,
         setting: ClassIncrementalSetting,
@@ -54,7 +52,7 @@ class DER(nn.Module):
         alpha: float,
         beta: float,
         buffer_size: float,
-        use_ssl: bool, 
+        use_ssl: bool,
         ssl_alpha: float,
         ssl_rotation_angles: int,
         use_owm: bool,
@@ -86,7 +84,7 @@ class DER(nn.Module):
         self.ssl_alpha = ssl_alpha
         self.ssl_m = len(ssl_rotation_angles)
         self.ssl_rotation_angles = ssl_rotation_angles
-        
+
         # OWM params
         self.use_owm = use_owm
 
@@ -116,7 +114,7 @@ class DER(nn.Module):
         NotImplementedError
             If no encoder is available for the given image dimensions.
         """
-        
+
         # TODO : Add the option for EfficientNet
 
         if image_space.width == image_space.height == 32:
@@ -128,8 +126,7 @@ class DER(nn.Module):
             encoder = resnet
         else:
             raise NotImplementedError(
-                f"TODO: Add an encoder for the given image space {image_space}"
-            )
+                f"TODO: Add an encoder for the given image space {image_space}")
         return encoder.to(self.device), features
 
     def forward(self, observations: Observations) -> Tensor:
@@ -141,9 +138,8 @@ class DER(nn.Module):
         logits = self.output(features)
         return logits
 
-    def shared_step(
-        self, batch: Tuple[Observations, Optional[Rewards]], environment: Environment
-    ) -> Tuple[Tensor, Dict]:
+    def shared_step(self, batch: Tuple[Observations, Optional[Rewards]],
+                    environment: Environment) -> Tuple[Tensor, Dict]:
         """Shared step used for both training and validation.
 
         Parameters
@@ -171,7 +167,7 @@ class DER(nn.Module):
         # get the corresponding rewards (image labels).
         observations: Observations = batch[0]
         rewards: Optional[Rewards] = batch[1]
-        
+
         # Get the predictions:
         logits = self(observations)
         y_pred = logits.argmax(-1)
@@ -189,42 +185,45 @@ class DER(nn.Module):
         # vvvvvv DER vvvvvvv
 
         if (observations.task_labels != observations.task_labels[0]).all().item():
-            print('NOT ALL EXAMPLES IN THE BATCH ARE FROM THE SAME TASK, THIS IS NOT CURRENTLY SUPPORTED.')
+            print(
+                'NOT ALL EXAMPLES IN THE BATCH ARE FROM THE SAME TASK, THIS IS NOT CURRENTLY SUPPORTED.'
+            )
 
         if not self.buffer.is_empty():
             batch_size = observations.x.shape[0]
             # TODO: Add proper transforms argument to get_data().
-            #       Actually the DER paper do not use augmentation for 
+            #       Actually the DER paper do not use augmentation for
             #       the MNIST dataset so maybe not needed. Issue #8
-            buf_inputs, buf_logits = self.buffer.get_data(batch_size) 
+            buf_inputs, buf_logits = self.buffer.get_data(batch_size)
             buf_outputs = self(Observations(x=buf_inputs))
             loss += self.alpha * F.mse_loss(buf_outputs, buf_logits)
 
             if self.use_ssl:
                 # FIXME: Is it possible that examples in the batch are from different tasks?
                 task_id = observations.task_labels[0].item()
-                alpha_t = self.alpha * (self.nb_tasks - task_id)/(self.nb_tasks - 1)
-                
+                alpha_t = self.alpha * (self.nb_tasks - task_id) / (self.nb_tasks - 1)
+
                 ssl_term = 0
                 buf_inputs, _ = self.buffer.get_data(batch_size)
                 for angle_label in range(self.ssl_m):
                     # Rotate data
                     angle = self.ssl_rotation_angles[angle_label]
-                    
+
                     # ret_tuple = (torch.stack([transform(ee.cpu())
                     #                     for ee in self.examples[choice]]).to(self.device),)
                     buf_inputs_transformed = Rotation(angle).forward(buf_inputs)
                     features = self.encoder(buf_inputs_transformed)
                     angle_logits = self.ssl_output(features)
-                    angle_labels = torch.LongTensor([angle_label]*batch_size).to(self.device)
+                    angle_labels = torch.LongTensor([angle_label] * batch_size).to(
+                        self.device)
                     ssl_term += self.loss(angle_logits, angle_labels)
-                
+
                 loss += alpha_t / self.ssl_m * ssl_term
 
         # NOTE: make sure arg examples are not augmented
         self.buffer.add_data(examples=observations.x, logits=logits.data)
         # ^^^^^^ DER ^^^^^^^
-        
+
         accuracy = (y_pred == image_labels).sum().float() / len(image_labels)
         metrics_dict = {"accuracy": f"{accuracy.cpu().item():3.2%}"}
         return loss, metrics_dict
@@ -235,7 +234,6 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
 
     This method uses the ExampleModel, which is quite simple.
     """
-
     @dataclass
     class HParams(HyperParameters):
         """ Hyper-parameters of the demo model. """
@@ -262,7 +260,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         # Use SSL
         use_ssl: bool = True
 
-        # SSL alpha hyperparameter 
+        # SSL alpha hyperparameter
         ssl_alpha: float = 5
 
         # List of possible rotation angles for SSL
@@ -321,9 +319,8 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 postfix = {}
                 train_pbar.set_description(f"Training Epoch {epoch}")
                 for i, batch in enumerate(train_pbar):
-                    loss, metrics_dict = self.model.shared_step(
-                        batch, environment=train_env
-                    )
+                    loss, metrics_dict = self.model.shared_step(batch,
+                                                                environment=train_env)
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
@@ -340,8 +337,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
 
                 for i, batch in enumerate(val_pbar):
                     batch_val_loss, metrics_dict = self.model.shared_step(
-                        batch, environment=valid_env
-                    )
+                        batch, environment=valid_env)
                     epoch_val_loss += batch_val_loss
                     postfix.update(metrics_dict, val_loss=epoch_val_loss)
                     val_pbar.set_postfix(postfix)
@@ -355,9 +351,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 # NOTE: You should probably reload the model weights as they were at the
                 # best epoch.
 
-    def get_actions(
-        self, observations: Observations, action_space: gym.Space
-    ) -> Actions:
+    def get_actions(self, observations: Observations, action_space: gym.Space) -> Actions:
         """ Get a batch of predictions (aka actions) for these observations. """
         with torch.no_grad():
             logits = self.model(observations)
@@ -381,10 +375,11 @@ if __name__ == "__main__":
     from sequoia.common import Config
     from sequoia.settings import ClassIncrementalSetting
 
-    # Create the Method:
+    # HACK: To get the path working
+    import sys
+    sys.path.insert(0, '../../')
 
-    # - Manually:
-    # method = ExampleMethod()
+    # Create the Method:
 
     # - From the command-line:
     from simple_parsing import ArgumentParser
@@ -409,4 +404,3 @@ if __name__ == "__main__":
     # configuration options like device, data_dir, etc.
     results = setting.apply(method, config=Config(data_dir="data"))
     print(results.summary())
-
