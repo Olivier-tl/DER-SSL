@@ -5,6 +5,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import random
 import dataclasses
 from dataclasses import dataclass
@@ -38,6 +39,8 @@ import torch.nn.functional as F
 
 from submission.utils.buffer import Buffer
 from submission.utils.rotation_transform import Rotation
+
+OUTPUT = 'output'
 
 
 class DER(nn.Module):
@@ -91,7 +94,7 @@ class DER(nn.Module):
 
     def create_output_head(self, n_outputs) -> nn.Module:
         return nn.Linear(self.representations_size, n_outputs).to(self.device)
-    
+
     def create_encoder(self, image_space: Image) -> Tuple[nn.Module, int]:
         """Create an encoder for the given image space.
 
@@ -126,8 +129,7 @@ class DER(nn.Module):
             resnet.fc = nn.Sequential()
             encoder = resnet
         else:
-            raise NotImplementedError(
-                f"TODO: Add an encoder for the given image space {image_space}")
+            raise NotImplementedError(f"TODO: Add an encoder for the given image space {image_space}")
         return encoder.to(self.device), features
 
     def forward(self, observations: Observations) -> Tensor:
@@ -186,18 +188,22 @@ class DER(nn.Module):
         # vvvvvv DER vvvvvvv
 
         if (observations.task_labels != observations.task_labels[0]).all().item():
-            print(
-                'NOT ALL EXAMPLES IN THE BATCH ARE FROM THE SAME TASK, THIS IS NOT CURRENTLY SUPPORTED.'
-            )
+            print('NOT ALL EXAMPLES IN THE BATCH ARE FROM THE SAME TASK, THIS IS NOT CURRENTLY SUPPORTED.')
 
         if not self.buffer.is_empty():
             batch_size = observations.x.shape[0]
             # TODO: Add proper transforms argument to get_data().
             #       Actually the DER paper do not use augmentation for
             #       the MNIST dataset so maybe not needed. Issue #8
-            buf_inputs, buf_logits = self.buffer.get_data(batch_size)
+            buf_inputs, _, buf_logits = self.buffer.get_data(batch_size)
             buf_outputs = self(Observations(x=buf_inputs))
             loss += self.alpha * F.mse_loss(buf_outputs, buf_logits)
+
+            # DER++
+            if self.beta != 0:
+                buf_inputs, labels, _ = self.buffer.get_data(batch_size)
+                buf_outputs = self(Observations(x=buf_inputs))
+                loss += self.beta * self.loss(buf_outputs, labels)
 
             if self.use_ssl:
                 # FIXME: Is it possible that examples in the batch are from different tasks?
@@ -205,24 +211,20 @@ class DER(nn.Module):
                 alpha_t = self.alpha * (self.nb_tasks - task_id) / (self.nb_tasks - 1)
 
                 ssl_term = 0
-                buf_inputs, _ = self.buffer.get_data(batch_size)
+                buf_inputs, _, _ = self.buffer.get_data(batch_size)
                 for angle_label in range(self.ssl_m):
                     # Rotate data
                     angle = self.ssl_rotation_angles[angle_label]
-
-                    # ret_tuple = (torch.stack([transform(ee.cpu())
-                    #                     for ee in self.examples[choice]]).to(self.device),)
                     buf_inputs_transformed = Rotation(angle).forward(buf_inputs)
                     features = self.encoder(buf_inputs_transformed)
                     angle_logits = self.ssl_output(features)
-                    angle_labels = torch.LongTensor([angle_label] * batch_size).to(
-                        self.device)
+                    angle_labels = torch.LongTensor([angle_label] * batch_size).to(self.device)
                     ssl_term += self.loss(angle_logits, angle_labels)
 
                 loss += alpha_t / self.ssl_m * ssl_term
 
         # NOTE: make sure arg examples are not augmented
-        self.buffer.add_data(examples=observations.x, logits=logits.data)
+        self.buffer.add_data(examples=observations.x, logits=logits.data, labels=image_labels)
         # ^^^^^^ DER ^^^^^^^
 
         accuracy = (y_pred == image_labels).sum().float() / len(image_labels)
@@ -285,7 +287,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
 
         You can use this to instantiate your model, for instance, since this is
         where you get access to the observation & action spaces.
-        """ 
+        """
         # self.trainer = self.create_trainer(setting)
         self.model = DER(
             setting=setting,
@@ -306,13 +308,15 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             lr=self.hparams.learning_rate,
             weight_decay=self.hparams.weight_decay,
         )
-        wandb.init(
-                    project=setting.wandb.project,
-                    entity=setting.wandb.entity,
-                    mode='offline',
-                    dir='output',
-                    config=dataclasses.asdict(self.hparams)
-        )
+
+        if not os.path.exists(OUTPUT):
+            os.mkdir(OUTPUT)
+
+        wandb.init(project=setting.wandb.project,
+                   entity=setting.wandb.entity,
+                   mode='offline',
+                   dir=OUTPUT,
+                   config=dataclasses.asdict(self.hparams))
         self.setting = setting
 
     def fit(self, train_env: PassiveEnvironment, valid_env: PassiveEnvironment):
@@ -337,9 +341,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 epoch_train_loss = 0.0
 
                 for i, batch in enumerate(train_pbar):
-                    loss, metrics_dict = self.model.shared_step(
-                        batch, environment=train_env
-                    )
+                    loss, metrics_dict = self.model.shared_step(batch, environment=train_env)
                     epoch_train_loss += loss
                     self.optimizer.zero_grad()
                     loss.backward()
@@ -356,21 +358,20 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 epoch_val_loss = 0.0
 
                 for i, batch in enumerate(val_pbar):
-                    batch_val_loss, metrics_dict = self.model.shared_step(
-                        batch, environment=valid_env)
+                    batch_val_loss, metrics_dict = self.model.shared_step(batch, environment=valid_env)
                     epoch_val_loss += batch_val_loss
                     postfix.update(metrics_dict, val_loss=epoch_val_loss)
                     val_pbar.set_postfix(postfix)
             torch.set_grad_enabled(True)
             valid_accuracy = float(metrics_dict['accuracy'][:-1])
             wandb.log({
-                        'epoch': epoch,
-                        'task_id': self.setting.get_attribute('_current_task_id'),
-                        'train_accuracy': train_accuracy,
-                        'valid_accuracy':valid_accuracy,
-                        'train_loss':epoch_train_loss,
-                        'valid_loss':epoch_val_loss,
-                    })
+                'epoch': epoch,
+                'task_id': self.setting.get_attribute('_current_task_id'),
+                'train_accuracy': train_accuracy,
+                'valid_accuracy': valid_accuracy,
+                'train_loss': epoch_train_loss,
+                'valid_loss': epoch_val_loss,
+            })
             if epoch_val_loss < best_val_loss:
                 best_val_loss = epoch_val_loss
                 best_epoch = i
@@ -378,7 +379,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 print(f"Early stopping at epoch {i}.")
                 # NOTE: You should probably reload the model weights as they were at the
                 # best epoch.
-    
+
     # def create_trainer(self, setting: SettingType) -> Trainer:
     #     """Creates a Trainer object from pytorch-lightning for the given setting.
 
