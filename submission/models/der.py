@@ -316,7 +316,8 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                    entity=setting.wandb.entity,
                    mode='offline',
                    dir=OUTPUT,
-                   config=dataclasses.asdict(self.hparams))
+                   config = dataclasses.asdict(self.hparams))
+        setting.set_attribute('num_workers', 1)
         self.setting = setting
 
     def fit(self, train_env: PassiveEnvironment, valid_env: PassiveEnvironment):
