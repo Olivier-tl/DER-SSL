@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, List
 import typing
 
+import matplotlib.pyplot as plt
 import wandb
 import gym
 import torch
@@ -29,10 +30,12 @@ from sequoia.settings.passive.cl.objects import (
     Environment,
     Observations,
     Rewards,
+    Results,
 )
 from simple_parsing import ArgumentParser
 from torch import Tensor, nn
 from torchvision.models import ResNet, resnet18
+from efficientnet_pytorch import EfficientNet
 from torchvision import transforms
 from torch.optim.optimizer import Optimizer
 import torch.nn.functional as F
@@ -41,7 +44,6 @@ from submission.utils.buffer import Buffer
 from submission.utils.rotation_transform import Rotation
 
 OUTPUT = 'output'
-
 
 class DER(nn.Module):
     """ Implementation of Dark Experience Replay
@@ -62,6 +64,8 @@ class DER(nn.Module):
         ssl_alpha: float,
         ssl_rotation_angles: int,
         use_owm: bool,
+        use_efficient_net: bool,
+        use_data_aug: bool,
     ):
         super().__init__()
         image_space: Image = observation_space.x
@@ -72,7 +76,8 @@ class DER(nn.Module):
         assert action_space == reward_space
         self.n_classes = action_space.n
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.encoder, self.representations_size = self.create_encoder(image_space)
+        self.use_efficient_net = use_efficient_net
+        self.encoder, self.representations_size = self.create_encoder(image_space, use_efficient_net)
         self.output = self.create_output_head(self.n_classes)
         self.ssl_output = self.create_output_head(len(ssl_rotation_angles))
         self.loss = nn.CrossEntropyLoss()
@@ -82,6 +87,8 @@ class DER(nn.Module):
         self.alpha = alpha
         self.beta = beta
         self.buffer = Buffer(buffer_size, self.device)
+        self.use_data_aug = use_data_aug
+        # self.augment = Transform()
 
         # SSL params
         self.use_ssl = use_ssl
@@ -95,7 +102,7 @@ class DER(nn.Module):
     def create_output_head(self, n_outputs) -> nn.Module:
         return nn.Linear(self.representations_size, n_outputs).to(self.device)
 
-    def create_encoder(self, image_space: Image) -> Tuple[nn.Module, int]:
+    def create_encoder(self, image_space: Image, use_efficient_net: bool) -> Tuple[nn.Module, int]:
         """Create an encoder for the given image space.
 
         Returns the encoder, as well as the size of the representations it will produce.
@@ -122,12 +129,19 @@ class DER(nn.Module):
         # TODO : Add the option for EfficientNet
 
         if image_space.width == image_space.height == 32:
-            # Synbols dataset: use a resnet18 by default.
-            resnet: ResNet = resnet18(pretrained=False)
-            features = resnet.fc.in_features
-            # Disable/Remove the last layer.
-            resnet.fc = nn.Sequential()
-            encoder = resnet
+            if use_efficient_net:
+                efficent_net = EfficientNet.from_name('efficientnet-b7', in_channels=image_space.c)
+                features = efficent_net._fc.in_features
+                # Disable/Remove the last layer.
+                efficent_net._fc = nn.Sequential()
+                encoder = efficent_net
+            else:
+                # Synbols dataset: use a resnet18 by default.
+                resnet: ResNet = resnet18(pretrained=False)
+                features = resnet.fc.in_features
+                # Disable/Remove the last layer.
+                resnet.fc = nn.Sequential()
+                encoder = resnet
         else:
             raise NotImplementedError(f"TODO: Add an encoder for the given image space {image_space}")
         return encoder.to(self.device), features
@@ -170,6 +184,9 @@ class DER(nn.Module):
         # get the corresponding rewards (image labels).
         observations: Observations = batch[0]
         rewards: Optional[Rewards] = batch[1]
+
+        # if self.use_data_aug:
+        #     observations.x = self.augment(observations.x)
 
         # Get the predictions:
         logits = self(observations)
@@ -247,7 +264,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         weight_decay: float = log_uniform(1e-9, 1e-3, default=1e-6)
 
         # Maximum number of training epochs per task.
-        max_epochs_per_task: int = 10
+        max_epochs_per_task: int = 1
         # Number of epochs with increasing validation loss after which we stop training.
         early_stop_patience: int = 2
 
@@ -271,6 +288,12 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
 
         # Use OWM
         use_owm: bool = False
+
+        # Use Efficient Net (otherwise resnet)
+        use_efficient_net: bool = False
+
+        # Use data augmentation
+        use_data_aug: bool = False
 
     def __init__(self, hparams: HParams = None):
         self.hparams: ExampleMethod.HParams = hparams or self.HParams()
@@ -302,6 +325,8 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             ssl_alpha=self.hparams.ssl_alpha,
             ssl_rotation_angles=self.hparams.ssl_rotation_angles,
             use_owm=self.hparams.use_owm,
+            use_efficient_net = self.hparams.use_efficient_net,
+            use_data_aug = self.hparams.use_data_aug,
         )
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
@@ -381,6 +406,15 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 # NOTE: You should probably reload the model weights as they were at the
                 # best epoch.
 
+    def receive_results(self, setting: Setting, results: Results):
+        """ Receives the results of an experiment, where `self` was applied to Setting
+        `setting`, which produced results `results`.
+        """
+        wandb.log(results.to_log_dict())
+        plots_ = results.make_plots()
+        for key, p in plots_:
+            print(key)
+            p.show()
     # def create_trainer(self, setting: SettingType) -> Trainer:
     #     """Creates a Trainer object from pytorch-lightning for the given setting.
 

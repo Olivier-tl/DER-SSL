@@ -20,9 +20,9 @@ from submission.submission import get_method, get_method_rl, get_method_sl
 def run_track(method: Method, setting: Setting, yamlfile: str) -> Results:
     setting = SettingProxy(setting, yamlfile)
     results = setting.apply(method)
-    print(f"Results summary:\n" f"{results.summary()}")
-    print("=====================")
-    print(results.to_log_dict())
+    # print(f"Results summary:\n" f"{results.summary()}")
+    # print("=====================")
+    # print(results.to_log_dict())
 
 
 def run_sl_track(method) -> ClassIncrementalSetting.Results:
@@ -49,6 +49,7 @@ def run_rl_and_sl_track():
 
 
 def main(mode: str = 'sl', ssl_alpha: float = None):
+    print(ssl_alpha)
     if mode == "sl":
         print("=== RUNNING SL TRACK")
         run_sl_track(get_method_sl(ssl_alpha=ssl_alpha))

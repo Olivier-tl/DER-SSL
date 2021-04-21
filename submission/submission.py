@@ -9,7 +9,7 @@ from .models.example_classifier import ExampleMethod
 from .models.der import DerMethod
 
 
-def get_method_sl(ssl_alpha: float = None) -> Method[PassiveSetting]:
+def get_method_sl(ssl_alpha: float = None, beta: float = None, use_ssl: bool = None, use_efficient_net: bool=False) -> Method[PassiveSetting]:
     """Returns the Method to be be used for the supervised learning track.
     
     Adjust this to your liking. You may create your own Method, or start from some of
@@ -24,8 +24,14 @@ def get_method_sl(ssl_alpha: float = None) -> Method[PassiveSetting]:
         A Method applicable to continual supervised learning Settings.
     """
     hparams = DerMethod.HParams()
-    if ssl_alpha:
+    if ssl_alpha != None:
         hparams.ssl_alpha = ssl_alpha
+    if beta != None:
+        hparams.beta = beta
+    if use_ssl != None:
+        hparams.use_ssl = use_ssl
+    if use_efficient_net != None:
+        hparams.use_efficient_net = use_efficient_net
     return DerMethod(hparams=hparams)
 
 

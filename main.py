@@ -20,7 +20,7 @@ def run_track(method: Method, setting: Setting, yamlfile: str) -> Results:
     results = setting.apply(method)
     print(f"Results summary:\n" f"{results.summary()}")
     print("=====================")
-    print(results.to_log_dict())
+    # print(results.to_log_dict())
 
 
 def run_sl_track(method) -> ClassIncrementalSetting.Results:
@@ -62,7 +62,7 @@ if __name__ == "__main__":
 
     if args.mode == "sl":
         print("=== RUNNING SL TRACK")
-        run_sl_track(get_method_sl())
+        run_sl_track(get_method_sl(use_efficient_net=True, beta=0, use_ssl=False))
 
     elif args.mode == "rl":
         print("=== RUNNING RL TRACK")
