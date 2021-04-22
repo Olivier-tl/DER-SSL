@@ -5,7 +5,8 @@ known_task_boundaries_at_test_time: false
 task_labels_at_train_time: true
 task_labels_at_test_time: false
 monitor_training_performance: true
-num_workers: 1
+num_workers: 8
+batch_size: 256
 wandb:
   project: DER-SSL
   entity: continual-learning

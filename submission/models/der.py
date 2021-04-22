@@ -45,6 +45,7 @@ from submission.utils.rotation_transform import Rotation
 
 OUTPUT = 'output'
 
+
 class DER(nn.Module):
     """ Implementation of Dark Experience Replay
 
@@ -64,7 +65,7 @@ class DER(nn.Module):
         ssl_alpha: float,
         ssl_rotation_angles: int,
         use_owm: bool,
-        use_efficient_net: bool,
+        model_name: bool,
         use_data_aug: bool,
     ):
         super().__init__()
@@ -76,8 +77,8 @@ class DER(nn.Module):
         assert action_space == reward_space
         self.n_classes = action_space.n
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.use_efficient_net = use_efficient_net
-        self.encoder, self.representations_size = self.create_encoder(image_space, use_efficient_net)
+        self.model_name = model_name
+        self.encoder, self.representations_size = self.create_encoder(image_space)
         self.output = self.create_output_head(self.n_classes)
         self.ssl_output = self.create_output_head(len(ssl_rotation_angles))
         self.loss = nn.CrossEntropyLoss()
@@ -102,7 +103,7 @@ class DER(nn.Module):
     def create_output_head(self, n_outputs) -> nn.Module:
         return nn.Linear(self.representations_size, n_outputs).to(self.device)
 
-    def create_encoder(self, image_space: Image, use_efficient_net: bool) -> Tuple[nn.Module, int]:
+    def create_encoder(self, image_space: Image) -> Tuple[nn.Module, int]:
         """Create an encoder for the given image space.
 
         Returns the encoder, as well as the size of the representations it will produce.
@@ -129,19 +130,21 @@ class DER(nn.Module):
         # TODO : Add the option for EfficientNet
 
         if image_space.width == image_space.height == 32:
-            if use_efficient_net:
+            if self.model_name == 'efficientnet':
                 efficent_net = EfficientNet.from_name('efficientnet-b7', in_channels=image_space.c)
                 features = efficent_net._fc.in_features
                 # Disable/Remove the last layer.
                 efficent_net._fc = nn.Sequential()
                 encoder = efficent_net
-            else:
+            elif self.model_name == 'resnet':
                 # Synbols dataset: use a resnet18 by default.
                 resnet: ResNet = resnet18(pretrained=False)
                 features = resnet.fc.in_features
                 # Disable/Remove the last layer.
                 resnet.fc = nn.Sequential()
                 encoder = resnet
+            else:
+                raise ValueError(f'Unknown model name "{self.model_name}"')
         else:
             raise NotImplementedError(f"TODO: Add an encoder for the given image space {image_space}")
         return encoder.to(self.device), features
@@ -264,7 +267,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         weight_decay: float = log_uniform(1e-9, 1e-3, default=1e-6)
 
         # Maximum number of training epochs per task.
-        max_epochs_per_task: int = 1
+        max_epochs_per_task: int = 10
         # Number of epochs with increasing validation loss after which we stop training.
         early_stop_patience: int = 2
 
@@ -272,13 +275,13 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         alpha: float = 0.5
 
         # Beta: Weight of label replay penalty for DER++
-        beta: float = 0.5
+        beta: float = 0
 
         # Buffer size
-        buffer_size: int = 500
+        buffer_size: int = 5000
 
         # Use SSL
-        use_ssl: bool = True
+        use_ssl: bool = False
 
         # SSL alpha hyperparameter
         ssl_alpha: float = 5
@@ -289,8 +292,8 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         # Use OWM
         use_owm: bool = False
 
-        # Use Efficient Net (otherwise resnet)
-        use_efficient_net: bool = False
+        # Model to use (either efficientnet or resnet)
+        model_name: str = 'efficientnet'
 
         # Use data augmentation
         use_data_aug: bool = False
@@ -325,8 +328,8 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             ssl_alpha=self.hparams.ssl_alpha,
             ssl_rotation_angles=self.hparams.ssl_rotation_angles,
             use_owm=self.hparams.use_owm,
-            use_efficient_net = self.hparams.use_efficient_net,
-            use_data_aug = self.hparams.use_data_aug,
+            model_name=self.hparams.model_name,
+            use_data_aug=self.hparams.use_data_aug,
         )
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
@@ -341,7 +344,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                    entity=setting.wandb.entity,
                    mode='offline',
                    dir=OUTPUT,
-                   config = dataclasses.asdict(self.hparams))
+                   config=dataclasses.asdict(self.hparams))
         setting.set_attribute('num_workers', 1)
         self.setting = setting
 
@@ -415,6 +418,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         for key, p in plots_:
             print(key)
             p.show()
+
     # def create_trainer(self, setting: SettingType) -> Trainer:
     #     """Creates a Trainer object from pytorch-lightning for the given setting.
 
