@@ -66,6 +66,8 @@ class DER(nn.Module):
         ssl_rotation_angles: int,
         use_owm: bool,
         model_name: bool,
+        use_drl: bool,
+        drl_lambda: float,
         use_data_aug: bool,
     ):
         super().__init__()
@@ -99,6 +101,10 @@ class DER(nn.Module):
 
         # OWM params
         self.use_owm = use_owm
+
+        # DRL params
+        self.use_drl = use_drl
+        self.drl_lambda = drl_lambda
 
     def create_output_head(self, n_outputs) -> nn.Module:
         return nn.Linear(self.representations_size, n_outputs).to(self.device)
@@ -205,6 +211,12 @@ class DER(nn.Module):
 
         loss = self.loss(logits, image_labels)
 
+        # vvvvvv DRL vvvvvvv
+        if self.use_drl:
+            drl_loss = torch.sum(logits * logits, dim=1).sum()
+            loss += self.drl_lambda * drl_loss
+        # ^^^^^^ DRL ^^^^^^^
+
         # vvvvvv DER vvvvvvv
 
         if (observations.task_labels != observations.task_labels[0]).all().item():
@@ -295,6 +307,10 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         # Model to use (either efficientnet or resnet)
         model_name: str = 'efficientnet'
 
+        # Use DRL
+        use_drl: bool = False
+        drl_lambda: float = 2e-3
+
         # Use data augmentation
         use_data_aug: bool = False
 
@@ -330,6 +346,8 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             use_owm=self.hparams.use_owm,
             model_name=self.hparams.model_name,
             use_data_aug=self.hparams.use_data_aug,
+            use_drl=self.hparams.use_drl,
+            drl_lambda=self.hparams.drl_lambda,
         )
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
@@ -368,16 +386,18 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 postfix = {}
                 train_pbar.set_description(f"Training Epoch {epoch}")
                 epoch_train_loss = 0.0
+                train_accuracy = []
 
                 for i, batch in enumerate(train_pbar):
                     loss, metrics_dict = self.model.shared_step(batch, environment=train_env)
                     epoch_train_loss += loss
+                    train_accuracy.append(float(metrics_dict['accuracy'][:-1]))
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
                     postfix.update(metrics_dict)
                     train_pbar.set_postfix(postfix)
-            train_accuracy = float(metrics_dict['accuracy'][:-1])
+            train_accuracy = torch.mean(torch.tensor(train_accuracy))
             # Validation loop:
             self.model.eval()
             torch.set_grad_enabled(False)
@@ -385,14 +405,16 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 postfix = {}
                 val_pbar.set_description(f"Validation Epoch {epoch}")
                 epoch_val_loss = 0.0
+                valid_accuracy = []
 
                 for i, batch in enumerate(val_pbar):
                     batch_val_loss, metrics_dict = self.model.shared_step(batch, environment=valid_env)
                     epoch_val_loss += batch_val_loss
+                    valid_accuracy.append(float(metrics_dict['accuracy'][:-1]))
                     postfix.update(metrics_dict, val_loss=epoch_val_loss)
                     val_pbar.set_postfix(postfix)
             torch.set_grad_enabled(True)
-            valid_accuracy = float(metrics_dict['accuracy'][:-1])
+            valid_accuracy = torch.mean(torch.tensor(valid_accuracy))
             wandb.log({
                 'epoch': epoch,
                 'task_id': self.setting.get_attribute('_current_task_id'),
@@ -414,10 +436,8 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         `setting`, which produced results `results`.
         """
         wandb.log(results.to_log_dict())
-        plots_ = results.make_plots()
-        for key, p in plots_:
-            print(key)
-            p.show()
+        print(results.make_plots())
+        wandb.log(results.make_plots())
 
     # def create_trainer(self, setting: SettingType) -> Trainer:
     #     """Creates a Trainer object from pytorch-lightning for the given setting.
