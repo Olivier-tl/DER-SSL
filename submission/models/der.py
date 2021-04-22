@@ -384,16 +384,18 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 postfix = {}
                 train_pbar.set_description(f"Training Epoch {epoch}")
                 epoch_train_loss = 0.0
+                train_accuracy = []
 
                 for i, batch in enumerate(train_pbar):
                     loss, metrics_dict = self.model.shared_step(batch, environment=train_env)
                     epoch_train_loss += loss
+                    train_accuracy.append(float(metrics_dict['accuracy'][:-1]))
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
                     postfix.update(metrics_dict)
                     train_pbar.set_postfix(postfix)
-            train_accuracy = float(metrics_dict['accuracy'][:-1])
+            train_accuracy = torch.mean(torch.tensor(train_accuracy))
             # Validation loop:
             self.model.eval()
             torch.set_grad_enabled(False)
@@ -401,14 +403,16 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                 postfix = {}
                 val_pbar.set_description(f"Validation Epoch {epoch}")
                 epoch_val_loss = 0.0
+                valid_accuracy = []
 
                 for i, batch in enumerate(val_pbar):
                     batch_val_loss, metrics_dict = self.model.shared_step(batch, environment=valid_env)
                     epoch_val_loss += batch_val_loss
+                    valid_accuracy.append(float(metrics_dict['accuracy'][:-1]))
                     postfix.update(metrics_dict, val_loss=epoch_val_loss)
                     val_pbar.set_postfix(postfix)
             torch.set_grad_enabled(True)
-            valid_accuracy = float(metrics_dict['accuracy'][:-1])
+            valid_accuracy = torch.mean(torch.tensor(valid_accuracy))
             wandb.log({
                 'epoch': epoch,
                 'task_id': self.setting.get_attribute('_current_task_id'),
