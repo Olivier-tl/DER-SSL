@@ -64,6 +64,8 @@ class DER(nn.Module):
         ssl_alpha: float,
         ssl_rotation_angles: int,
         use_owm: bool,
+        use_drl: bool,
+        drl_lambda: float,
         use_efficient_net: bool,
         use_data_aug: bool,
     ):
@@ -98,6 +100,10 @@ class DER(nn.Module):
 
         # OWM params
         self.use_owm = use_owm
+
+        # DRL params
+        self.use_drl = use_drl
+        self.drl_lambda = drl_lambda
 
     def create_output_head(self, n_outputs) -> nn.Module:
         return nn.Linear(self.representations_size, n_outputs).to(self.device)
@@ -202,6 +208,13 @@ class DER(nn.Module):
 
         loss = self.loss(logits, image_labels)
 
+
+        # vvvvvv DRL vvvvvvv
+        if self.use_drl:
+            drl_loss = torch.sum(logits*logits, dim=1).sum()
+            loss += self.drl_lambda * drl_loss
+        # ^^^^^^ DRL ^^^^^^^
+
         # vvvvvv DER vvvvvvv
 
         if (observations.task_labels != observations.task_labels[0]).all().item():
@@ -264,7 +277,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         weight_decay: float = log_uniform(1e-9, 1e-3, default=1e-6)
 
         # Maximum number of training epochs per task.
-        max_epochs_per_task: int = 1
+        max_epochs_per_task: int = 10
         # Number of epochs with increasing validation loss after which we stop training.
         early_stop_patience: int = 2
 
@@ -288,6 +301,10 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
 
         # Use OWM
         use_owm: bool = False
+
+        # Use DRL
+        use_drl: bool = False
+        drl_lambda: float = 2e-3
 
         # Use Efficient Net (otherwise resnet)
         use_efficient_net: bool = False
@@ -325,6 +342,8 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             ssl_alpha=self.hparams.ssl_alpha,
             ssl_rotation_angles=self.hparams.ssl_rotation_angles,
             use_owm=self.hparams.use_owm,
+            use_drl=self.hparams.use_drl,
+            drl_lambda=self.hparams.drl_lambda,
             use_efficient_net = self.hparams.use_efficient_net,
             use_data_aug = self.hparams.use_data_aug,
         )
@@ -411,10 +430,8 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         `setting`, which produced results `results`.
         """
         wandb.log(results.to_log_dict())
-        plots_ = results.make_plots()
-        for key, p in plots_:
-            print(key)
-            p.show()
+        print(results.make_plots())
+        wandb.log(results.make_plots())
     # def create_trainer(self, setting: SettingType) -> Trainer:
     #     """Creates a Trainer object from pytorch-lightning for the given setting.
 

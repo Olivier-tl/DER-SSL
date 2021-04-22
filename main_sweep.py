@@ -48,8 +48,7 @@ def run_rl_and_sl_track():
     print(results_rl.to_log_dict())
 
 
-def main(mode: str = 'sl', ssl_alpha: float = None):
-    print(ssl_alpha)
+def main(mode: str = 'sl', ssl_alpha: float = None, beta: float = None, use_ssl: bool = None, use_efficient_net: bool=False):
     if mode == "sl":
         print("=== RUNNING SL TRACK")
         run_sl_track(get_method_sl(ssl_alpha=ssl_alpha))

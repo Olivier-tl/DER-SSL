@@ -62,7 +62,7 @@ if __name__ == "__main__":
 
     if args.mode == "sl":
         print("=== RUNNING SL TRACK")
-        run_sl_track(get_method_sl(use_efficient_net=True, beta=0, use_ssl=False))
+        run_sl_track(get_method_sl())
 
     elif args.mode == "rl":
         print("=== RUNNING RL TRACK")
