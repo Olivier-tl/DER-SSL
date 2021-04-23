@@ -35,6 +35,7 @@ from sequoia.settings.passive.cl.objects import (
 )
 from simple_parsing import ArgumentParser
 from torch import Tensor, nn
+from torchvision import transforms
 from torchvision.models import ResNet, resnet18
 from efficientnet_pytorch import EfficientNet
 from torchvision import transforms
@@ -87,6 +88,9 @@ class DER(nn.Module):
         self.ssl_output = self.create_output_head(len(ssl_rotation_angles))
         self.loss = nn.CrossEntropyLoss()
         self.nb_tasks = nb_tasks
+        
+        # Data Augmentation params
+        self.transforms = transforms.Compose([transforms.RandomAffine([-10,10], scale=[0.9,1.1], translate=[0.1,0.1], shear=[-2,2] ),])
 
         # DER params
         self.alpha = alpha
@@ -197,8 +201,9 @@ class DER(nn.Module):
         observations: Observations = batch[0]
         rewards: Optional[Rewards] = batch[1]
 
-        # if self.use_data_aug:
-        #     observations.x = self.augment(observations.x)
+        batch_size = observations.x.shape[0]
+        if self.use_data_aug:
+            observations = Observations(x=self.transforms(observations.x), task_labels=observations.task_labels)
 
         # Get the predictions:
         logits = self(observations)
@@ -214,13 +219,24 @@ class DER(nn.Module):
 
         loss = self.loss(logits, image_labels)
 
+        if self.use_ssl:
+            task_id = observations.task_labels[0].item()
+            alpha_t = self.alpha * (self.nb_tasks - task_id) / (self.nb_tasks - 1)
+
+            ssl_term = 0
+            inputs_ssl = observations.x
+            # Rotate data
+            angle = self.ssl_rotation_angles[angle_label]
+            inputs_transformed = Rotation(angle).forward(inputs_ssl).to(self.device)
+            features = self.encoder(inputs_transformed)
+            angle_logits = self.ssl_output(features)
+            angle_labels = torch.LongTensor([angle_label] * batch_size).to(self.device)
+            ssl_term += self.loss(angle_logits, angle_labels)
+
+            loss += alpha_t / self.ssl_m * ssl_term
+
         # vvvvvv DER vvvvvvv
-
-        if (observations.task_labels != observations.task_labels[0]).all().item():
-            print('NOT ALL EXAMPLES IN THE BATCH ARE FROM THE SAME TASK, THIS IS NOT CURRENTLY SUPPORTED.')
-
         if not self.buffer.is_empty():
-            batch_size = observations.x.shape[0]
             # TODO: Add proper transforms argument to get_data().
             #       Actually the DER paper do not use augmentation for
             #       the MNIST dataset so maybe not needed. Issue #8
@@ -233,24 +249,6 @@ class DER(nn.Module):
                 buf_inputs, labels, _ = self.buffer.get_data(batch_size)
                 buf_outputs = self(Observations(x=buf_inputs))
                 loss += self.beta * self.loss(buf_outputs, labels)
-
-            if self.use_ssl:
-                # FIXME: Is it possible that examples in the batch are from different tasks?
-                task_id = observations.task_labels[0].item()
-                alpha_t = self.alpha * (self.nb_tasks - task_id) / (self.nb_tasks - 1)
-
-                ssl_term = 0
-                buf_inputs, _, _ = self.buffer.get_data(batch_size)
-                for angle_label in range(self.ssl_m):
-                    # Rotate data
-                    angle = self.ssl_rotation_angles[angle_label]
-                    buf_inputs_transformed = Rotation(angle).forward(buf_inputs)
-                    features = self.encoder(buf_inputs_transformed)
-                    angle_logits = self.ssl_output(features)
-                    angle_labels = torch.LongTensor([angle_label] * batch_size).to(self.device)
-                    ssl_term += self.loss(angle_logits, angle_labels)
-
-                loss += alpha_t / self.ssl_m * ssl_term
 
             # vvvvvv DRL vvvvvvv
             if self.use_drl:
@@ -274,7 +272,6 @@ class DER(nn.Module):
         accuracy = (y_pred == image_labels).sum().float() / len(image_labels)
         metrics_dict = {"accuracy": f"{accuracy.cpu().item():3.2%}"}
         return loss, metrics_dict
-
 
 class DerMethod(Method, target_setting=ClassIncrementalSetting):
     """ Method using Dark Experience Replay (DER)
@@ -305,7 +302,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         buffer_size: int = 5000
 
         # Use SSL
-        use_ssl: bool = False
+        use_ssl: bool = True
 
         # SSL alpha hyperparameter
         ssl_alpha: float = 5
@@ -325,7 +322,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         drl_batch_size: int = 10
 
         # Use data augmentation
-        use_data_aug: bool = False
+        use_data_aug: bool = True
 
     def __init__(self, hparams: HParams = None):
         self.hparams: ExampleMethod.HParams = hparams or self.HParams()
@@ -333,7 +330,6 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         # We will create those when `configure` will be called, before training.
         self.model: DER
         self.optimizer: torch.optim.Optimizer
-
         # self.trainer_options = TrainerConfig()
         # self.config = Config()
 
