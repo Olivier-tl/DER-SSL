@@ -11,6 +11,7 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, List
 import typing
+import copy
 
 import matplotlib.pyplot as plt
 import wandb
@@ -69,6 +70,7 @@ class DER(nn.Module):
         use_drl: bool,
         drl_lambda: float,
         use_data_aug: bool,
+        drl_batch_size: int,
     ):
         super().__init__()
         image_space: Image = observation_space.x
@@ -105,6 +107,7 @@ class DER(nn.Module):
         # DRL params
         self.use_drl = use_drl
         self.drl_lambda = drl_lambda
+        self.drl_batch_size = drl_batch_size
 
     def create_output_head(self, n_outputs) -> nn.Module:
         return nn.Linear(self.representations_size, n_outputs).to(self.device)
@@ -211,12 +214,6 @@ class DER(nn.Module):
 
         loss = self.loss(logits, image_labels)
 
-        # vvvvvv DRL vvvvvvv
-        if self.use_drl:
-            drl_loss = torch.sum(logits * logits, dim=1).sum()
-            loss += self.drl_lambda * drl_loss
-        # ^^^^^^ DRL ^^^^^^^
-
         # vvvvvv DER vvvvvvv
 
         if (observations.task_labels != observations.task_labels[0]).all().item():
@@ -255,6 +252,21 @@ class DER(nn.Module):
 
                 loss += alpha_t / self.ssl_m * ssl_term
 
+            # vvvvvv DRL vvvvvvv
+            if self.use_drl:
+                _, _, buf_logits = self.buffer.get_data(self.drl_batch_size)
+                drl_loss = 0
+                n = len(buf_logits)**2 - len(buf_logits)
+                for i in range(len(buf_logits)):
+                    for j in range(len(buf_logits)):
+                        if i == j:
+                            continue
+                        drl_loss += torch.dot(buf_logits[i], buf_logits[j])
+
+                # drl_loss = torch.sum(logits * logits, dim=1).mean()
+                loss += self.drl_lambda * (1 / n) * drl_loss
+            # ^^^^^^ DRL ^^^^^^^
+
         # NOTE: make sure arg examples are not augmented
         self.buffer.add_data(examples=observations.x, logits=logits.data, labels=image_labels)
         # ^^^^^^ DER ^^^^^^^
@@ -279,15 +291,15 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         weight_decay: float = log_uniform(1e-9, 1e-3, default=1e-6)
 
         # Maximum number of training epochs per task.
-        max_epochs_per_task: int = 10
+        max_epochs_per_task: int = 15
         # Number of epochs with increasing validation loss after which we stop training.
         early_stop_patience: int = 2
 
         # Alpha: Weight of logits replay penalty for DER
-        alpha: float = 0.5
+        alpha: float = 1
 
         # Beta: Weight of label replay penalty for DER++
-        beta: float = 0
+        beta: float = 1
 
         # Buffer size
         buffer_size: int = 5000
@@ -305,11 +317,12 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         use_owm: bool = False
 
         # Model to use (either efficientnet or resnet)
-        model_name: str = 'efficientnet'
+        model_name: str = 'resnet'
 
         # Use DRL
         use_drl: bool = False
         drl_lambda: float = 2e-3
+        drl_batch_size: int = 10
 
         # Use data augmentation
         use_data_aug: bool = False
@@ -348,6 +361,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             use_data_aug=self.hparams.use_data_aug,
             use_drl=self.hparams.use_drl,
             drl_lambda=self.hparams.drl_lambda,
+            drl_batch_size=self.hparams.drl_batch_size,
         )
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
@@ -363,7 +377,6 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
                    mode='offline',
                    dir=OUTPUT,
                    config=dataclasses.asdict(self.hparams))
-        setting.set_attribute('num_workers', 1)
         self.setting = setting
 
     def fit(self, train_env: PassiveEnvironment, valid_env: PassiveEnvironment):
@@ -376,6 +389,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         # self.trainer = self.create_trainer(self.setting)
         # configure() will have been called by the setting before we get here.
         best_val_loss = inf
+        best_model = None
         best_epoch = 0
         for epoch in range(self.hparams.max_epochs_per_task):
             self.model.train()
@@ -426,10 +440,11 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             if epoch_val_loss < best_val_loss:
                 best_val_loss = epoch_val_loss
                 best_epoch = i
+                best_model_params = self.model.state_dict()
             if i - best_epoch > self.hparams.early_stop_patience:
                 print(f"Early stopping at epoch {i}.")
-                # NOTE: You should probably reload the model weights as they were at the
-                # best epoch.
+                break
+        self.model.load_state_dict(best_model_params)
 
     def receive_results(self, setting: Setting, results: Results):
         """ Receives the results of an experiment, where `self` was applied to Setting
