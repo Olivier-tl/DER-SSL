@@ -227,13 +227,14 @@ class DER(nn.Module):
 
             ssl_term = 0
             inputs_ssl = observations.x
-            # Rotate data
-            angle = self.ssl_rotation_angles[angle_label]
-            inputs_transformed = Rotation(angle).forward(inputs_ssl).to(self.device)
-            features = self.encoder(inputs_transformed)
-            angle_logits = self.ssl_output(features)
-            angle_labels = torch.LongTensor([angle_label] * batch_size).to(self.device)
-            ssl_term += self.loss(angle_logits, angle_labels)
+            for angle_label in range(self.ssl_m):
+                # Rotate data
+                angle = self.ssl_rotation_angles[angle_label]
+                inputs_transformed = Rotation(angle).forward(inputs_ssl).to(self.device)
+                features = self.encoder(inputs_transformed)
+                angle_logits = self.ssl_output(features)
+                angle_labels = torch.LongTensor([angle_label] * batch_size).to(self.device)
+                ssl_term += self.loss(angle_logits, angle_labels)
 
             loss += alpha_t / self.ssl_m * ssl_term
 
