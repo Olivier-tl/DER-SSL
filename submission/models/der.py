@@ -70,6 +70,7 @@ class DER(nn.Module):
         model_name: bool,
         use_drl: bool,
         drl_lambda: float,
+        drl_alpha: float,
         use_data_aug: bool,
         drl_batch_size: int,
     ):
@@ -112,6 +113,7 @@ class DER(nn.Module):
         self.use_drl = use_drl
         self.drl_lambda = drl_lambda
         self.drl_batch_size = drl_batch_size
+        self.drl_alpha = drl_alpha
 
     def create_output_head(self, n_outputs) -> nn.Module:
         return nn.Linear(self.representations_size, n_outputs).to(self.device)
@@ -252,17 +254,24 @@ class DER(nn.Module):
 
             # vvvvvv DRL vvvvvvv
             if self.use_drl:
-                _, _, buf_logits = self.buffer.get_data(self.drl_batch_size)
-                drl_loss = 0
-                n = len(buf_logits)**2 - len(buf_logits)
+                _, buf_labels, buf_logits = self.buffer.get_data(self.drl_batch_size)
+                while len(torch.unique(buf_labels)) == len(buf_labels):
+                    _, buf_labels, buf_logits = self.buffer.get_data(self.drl_batch_size)
+                drl_loss_bt = 0
+                drl_loss_wi = 0
+                n_bt = 0
+                n_wi = 0
                 for i in range(len(buf_logits)):
                     for j in range(len(buf_logits)):
                         if i == j:
                             continue
-                        drl_loss += torch.dot(buf_logits[i], buf_logits[j])
-
-                # drl_loss = torch.sum(logits * logits, dim=1).mean()
-                loss += self.drl_lambda * (1 / n) * drl_loss
+                        if buf_labels[i]==buf_labels[j]:
+                            n_wi += 1
+                            drl_loss_wi += torch.dot(buf_logits[i], buf_logits[j])
+                        else:
+                            n_bt += 1
+                            drl_loss_bt += torch.dot(buf_logits[i], buf_logits[j])
+                loss += self.drl_lambda * ((1 / n_bt) * drl_loss_bt + self.drl_alpha * (1/n_wi) * drl_loss_wi)
             # ^^^^^^ DRL ^^^^^^^
 
         # NOTE: make sure arg examples are not augmented
@@ -319,6 +328,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
         # Use DRL
         use_drl: bool = False
         drl_lambda: float = 2e-3
+        drl_alpha: float = 1
         drl_batch_size: int = 10
 
         # Use data augmentation
@@ -357,6 +367,7 @@ class DerMethod(Method, target_setting=ClassIncrementalSetting):
             use_data_aug=self.hparams.use_data_aug,
             use_drl=self.hparams.use_drl,
             drl_lambda=self.hparams.drl_lambda,
+            drl_alpha=self.hparams.drl_alpha,
             drl_batch_size=self.hparams.drl_batch_size,
         )
         self.optimizer = torch.optim.Adam(

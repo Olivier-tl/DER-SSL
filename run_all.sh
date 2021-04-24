@@ -3,7 +3,7 @@
 
 for der_plus in 1 0;
 do
-    for x in 0.5 1.0 1.5 2.0;
+    for x in 1.5 2.0;
     do
         if [[ $der_plus -eq 1 ]]
         then
